@@ -1,0 +1,261 @@
+/*
+Pin Connections:
+- I2C Communication:
+  - SDA: Pin 18 on Teensy 4.0 (connected to SDA on Prop Shield)
+  - SCL: Pin 19 on Teensy 4.0 (connected to SCL on Prop Shield)
+
+- Power:
+  - 3.3V: Connected to 3.3V pin on Prop Shield
+  - GND: Connected to GND pin on Prop Shield
+
+- LED Indicator:
+  - LED: Pin 13 on Teensy 4.0
+
+- Servo:
+  - Servo: Pin 9 on Teensy 4.0
+
+Code Overview:
+- Initialize I2C communication and check sensor connection.
+- Set up FXOS8700CQ sensor for magnetometer operation.
+- Continuously read magnetometer data, process it to detect EMF, and display on the serial monitor.
+- Control a servo motor and an LED based on the magnetic field magnitude.
+
+Functions:
+- setup(): Initializes serial communication, I2C, and sensor.
+- loop(): Reads and displays magnetometer data periodically.
+- initFXOS8700CQ(): Configures the FXOS8700CQ sensor.
+- readMagData(): Reads magnetometer data from the sensor.
+- writeByte(): Writes a byte to a specific register over I2C.
+- readByte(): Reads a byte from a specific register over I2C.
+- readBytes(): Reads multiple bytes from specific registers over I2C.
+- calibrateSensor(): Calibrates the sensor to establish a baseline for magnetic field measurements.
+- getMagneticFieldMagnitude(): Calculates the magnetic field magnitude from the raw data.
+
+Adjustable Settings:
+- uint8_t magOSR = 3; // Oversampling rate for faster output. Range: 0-7
+- float mRes = 0.1;   // Magnetometer resolution (0.1 milliGauss/LSB)
+- int calibrationTime = 5000; // Calibration duration in milliseconds
+- int interval = 10; // Interval between readings in milliseconds
+- const int numReadings = 10; // Number of readings for the moving average
+- const float spikeThreshold = 20.0; // Threshold for spike detection
+*/
+
+#include <Wire.h>
+#include <SPI.h>
+#include <PWMServo.h>
+// #include <Adafruit_GFX.h>
+// #include <Adafruit_ST7789.h>
+
+// FXOS8700CQ Registers
+#define FXOS8700CQ_ADDRESS 0x1E
+#define FXOS8700CQ_WHO_AM_I 0x0D
+#define FXOS8700CQ_M_DR_STATUS 0x32
+#define FXOS8700CQ_M_OUT_X_MSB 0x33
+#define FXOS8700CQ_M_OUT_X_LSB 0x34
+#define FXOS8700CQ_M_OUT_Y_MSB 0x35
+#define FXOS8700CQ_M_OUT_Y_LSB 0x36
+#define FXOS8700CQ_M_OUT_Z_MSB 0x37
+#define FXOS8700CQ_M_OUT_Z_LSB 0x38
+#define FXOS8700CQ_M_CTRL_REG1 0x5B
+
+// #define tftCS 10  
+// #define tftRST 6     
+// #define tftDC 5 
+
+// Adjustable Settings
+uint8_t magOSR = 5; // Oversampling rate for faster output. Range: 0-7
+float mRes = 0.5;   // Magnetometer resolution (0.1 milliGauss/LSB)
+int calibrationTime = 15000; // Calibration duration in milliseconds
+int interval = 100; // Interval between readings in milliseconds
+const int numReadings = 10; // Number of readings for the moving average
+const float spikeThreshold = 50.0; // Threshold for spike detection
+
+// Pin Definitions
+const int ledPin = 13;
+const int servoPin = 9;
+
+PWMServo myServo;
+// Adafruit_ST7789 tft = Adafruit_ST7789(tftCS, tftDC, tftRST);
+
+// Variables
+int16_t magBias[3] = {0, 0, 0};
+float magnitudeHistory[numReadings];
+int historyIndex = 0;
+float total = 0;
+float previousValue = 0;
+bool calibrated = false;
+
+// Safety limits
+const float minMagnitude = 0.0;
+const float maxMagnitude = 1050.0; // Adjusted for expected range
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  pinMode(ledPin, OUTPUT);
+  myServo.attach(servoPin);
+  myServo.write(0);
+
+  // Initialize the display
+  // tft.init(135, 240, SPI_MODE0);
+  // tft.setRotation(2);
+  // tft.fillScreen(ST77XX_BLACK);
+  // tft.setTextColor(ST77XX_WHITE);
+
+  // Verify sensor connection
+  if (readByte(FXOS8700CQ_ADDRESS, FXOS8700CQ_WHO_AM_I) != 0xC7) {
+    Serial.println("Could not find FXOS8700CQ sensor.");
+    while (1);
+  }
+
+  initFXOS8700CQ();
+  calibrateSensor();
+}
+
+void loop() {
+  if (readByte(FXOS8700CQ_ADDRESS, FXOS8700CQ_M_DR_STATUS) & 0x08) {
+    int16_t magData[3];
+    readMagData(magData);
+
+    // Adjust raw values with bias
+    magData[0] -= magBias[0];
+    magData[1] -= magBias[1];
+    magData[2] -= magBias[2];
+
+    float magnitude = getMagneticFieldMagnitude(magData);
+
+    // Moving average for smooth readings
+    total -= magnitudeHistory[historyIndex];
+    magnitudeHistory[historyIndex] = magnitude;
+    total += magnitudeHistory[historyIndex];
+    historyIndex = (historyIndex + 1) % numReadings;
+    float smoothedMagnitude = total / numReadings;
+
+    // Spike detection to avoid wild jumps
+    if (abs(magnitude - smoothedMagnitude) > spikeThreshold) {
+      smoothedMagnitude = (smoothedMagnitude + magnitude) / 2;
+    }
+
+      myServo.write(map(smoothedMagnitude, 0, 100, 0, 180));
+      updateLedBlinkRate(smoothedMagnitude);
+
+      // Display the smoothed magnitude
+      Serial.print("Magnetic field magnitude: ");
+      Serial.print(smoothedMagnitude);
+      Serial.println(" mG");
+
+    // Control servo and LED based on the magnitude
+    // if (smoothedMagnitude != previousValue){
+ 
+
+    //   previousValue = smoothedMagnitude;
+    // }
+
+
+    // tft.fillScreen(ST77XX_BLACK);
+    // tft.setCursor(10, 10);
+    // tft.print("Mag Field: ");
+    // tft.print(smoothedMagnitude);
+    // tft.println(" mG");
+  }
+
+  delay(interval);
+}
+
+void initFXOS8700CQ() {
+  writeByte(FXOS8700CQ_ADDRESS, FXOS8700CQ_M_CTRL_REG1, 0x80 | (magOSR << 2) | 0x03);
+}
+
+void readMagData(int16_t* destination) {
+  uint8_t rawData[6];
+  readBytes(FXOS8700CQ_ADDRESS, FXOS8700CQ_M_OUT_X_MSB, 6, &rawData[0]);
+  destination[0] = (int16_t)((rawData[0] << 8) | rawData[1]);
+  destination[1] = (int16_t)((rawData[2] << 8) | rawData[3]);
+  destination[2] = (int16_t)((rawData[4] << 8) | rawData[5]);
+}
+
+float getMagneticFieldMagnitude(int16_t* magData) {
+  return sqrt(sq(magData[0] * mRes) + sq(magData[1] * mRes) + sq(magData[2] * mRes));
+}
+
+void calibrateSensor() {
+  Serial.println("Calibrating sensor...");
+  int32_t magBiasSum[3] = {0, 0, 0};
+  unsigned long startTime = millis();
+  unsigned long lastUpdateTime = millis();
+
+  while (millis() - startTime < calibrationTime) {
+    if (readByte(FXOS8700CQ_ADDRESS, FXOS8700CQ_M_DR_STATUS) & 0x08) {
+      int16_t magData[3];
+      readMagData(magData);
+      magBiasSum[0] += magData[0];
+      magBiasSum[1] += magData[1];
+      magBiasSum[2] += magData[2];
+      delay(100); // Delay between readings
+    }
+
+    // Update the user every second
+    if (millis() - lastUpdateTime >= 1000) {
+      int elapsedTime = (millis() - startTime) / 1000;
+      int remainingTime = (calibrationTime / 1000) - elapsedTime;
+      Serial.print("Calibration in progress... ");
+      Serial.print(elapsedTime);
+      Serial.print(" seconds elapsed, ");
+      Serial.print(remainingTime);
+      Serial.println(" seconds remaining.");
+      lastUpdateTime = millis();
+    }
+  }
+
+  magBias[0] = magBiasSum[0] / (calibrationTime / 100);
+  magBias[1] = magBiasSum[1] / (calibrationTime / 100);
+  magBias[2] = magBiasSum[2] / (calibrationTime / 100);
+
+  Serial.println("Calibration complete.");
+}
+
+void updateLedBlinkRate(float magnitude) {
+  // Define the minimum and maximum blink rates (in milliseconds)
+  const int minBlinkRate = 300;  // Fastest blink rate
+  const int maxBlinkRate = 1000; // Slowest blink rate
+
+  // Map the magnetic field magnitude to the blink rate
+  int blinkRate = map(magnitude, minMagnitude, maxMagnitude, maxBlinkRate, minBlinkRate);
+
+  // Blink the LED with the calculated blink rate
+  static unsigned long lastBlinkTime = 0;
+  static bool ledState = false;
+
+  if (millis() - lastBlinkTime >= blinkRate) {
+    ledState = !ledState;
+    digitalWrite(ledPin, ledState);
+    lastBlinkTime = millis();
+  }
+}
+
+void writeByte(uint8_t address, uint8_t subAddress, uint8_t data) {
+  Wire.beginTransmission(address);
+  Wire.write(subAddress);
+  Wire.write(data);
+  Wire.endTransmission();
+}
+
+uint8_t readByte(uint8_t address, uint8_t subAddress) {
+  uint8_t data;
+  Wire.beginTransmission(address);
+  Wire.write(subAddress);
+  Wire.endTransmission(false);
+  Wire.requestFrom(address, (size_t)1);
+  data = Wire.read();
+  return data;
+}
+
+void readBytes(uint8_t address, uint8_t subAddress, uint8_t count, uint8_t* dest) {
+  Wire.beginTransmission(address);
+  Wire.write(subAddress);
+  Wire.endTransmission(false);
+  Wire.requestFrom(address, (size_t)count);
+  for (uint8_t i = 0; i < count; i++) {
+    dest[i] = Wire.read();
+  }
+}
